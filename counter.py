@@ -1,9 +1,9 @@
 """Ball-on-board counting core: no UI, no networking. Feed it frames, get events.
 
 Per frame:
-  1. identify()     which unlabeled markers are the board (centre + two rim markers) and
-                    which is the ball, from the board triangle's shape alone, so marker
-                    IDs changing mid-trial don't matter
+  1. identify()     which unlabeled markers are the board (centre + 315° and 45° rim markers,
+                    plus the north rim marker in between) and which is the ball, from the
+                    board's shape alone, so marker IDs changing mid-trial don't matter
   2. to_map()       project the ball onto the board, in the board map's frame (cm)
   3. Counter.update gate crossings and edge hits
 
@@ -21,6 +21,7 @@ import numpy as np
 R_BOARD = 39.0                  # cm, centre -> rim marker
 GATES = (0, 90, 180, 270)       # compass degrees on the board map
 ROT = 135                       # board axes (u toward the 315° marker) -> map frame, degrees
+NORTH_TOL_MM = 10.0             # north marker match: rigid, so ~1 mm off; the ball can't get this close to it
 
 
 @dataclass
@@ -34,8 +35,10 @@ class Settings:
     edge_hit_r: float = 37.0        # cm from the centre that counts as hitting the edge
     edge_rearm_r: float = 35.0      # the ball must come back inside this before the next hit
     centre_rim_mm: float = 390.0    # board marker triangle: centre <-> rim marker
-    rim_rim_mm: float = 556.0       # rim marker <-> rim marker
-    marker_tol_mm: float = 30.0     # how far the triangle may deviate from the above
+    rim_rim_mm: float = 556.0       # 315° rim marker <-> 45° rim marker
+    north_nw_mm: float = 315.0      # north rim marker <-> 315° marker (centre <-> north: centre_rim_mm)
+    north_ne_mm: float = 285.0      # north rim marker <-> 45° marker
+    marker_tol_mm: float = 15.0     # how far the board distances may deviate from the above
     max_gap_s: float = 0.5          # ball lost for longer than this: don't bridge the gap
 
     @classmethod
@@ -56,35 +59,50 @@ class Settings:
 def identify(markers, s):
     """(k,3) unlabeled marker positions (mm) -> (centre, ne, nw, ball) positions, or None.
 
-    Board: the triangle whose sides match centre-rim, centre-rim, rim-rim. The centre is
-    where the two short sides meet. The rim markers are told apart by turning direction:
-    seen from above, going from the 45° marker to the 315° marker around the centre is
-    anticlockwise. "Above" is the room axis the board's normal points along most (the
-    board is roughly level), so this works with Z-up CSV exports and Y-up streams alike.
+    Board: a triangle whose sides match centre-rim, centre-rim, rim-rim (the 315° and 45°
+    markers). The rim markers are told apart by turning direction: seen from above, going
+    from the 45° marker to the 315° marker around the centre is anticlockwise. "Above" is
+    the room axis the board's normal points along most (the board is roughly level), so
+    this works with Z-up CSV exports and Y-up streams alike.
+    North marker: the 4th board marker, on the rim between the 315° and 45° markers, at
+    north_nw_mm / north_ne_mm from them. The ball near the rim can mimic a rim marker and
+    form a second plausible triangle; only the real 315°/45° pair has the north marker
+    next to it, so it decides between them. Every triangle is scored on all its distances
+    plus the north match (capped, so a hidden north marker or a 3-marker board still work).
+    The north marker lies on the board too and is never taken for the ball.
     Ball: the leftover marker lying on the board, if any (else ball is None).
     """
     m = markers[~np.isnan(markers).any(axis=1)]
     if len(m) < 3:
         return None
     d = np.linalg.norm(m[:, None] - m[None], axis=2)
+    north_err = lambda i, ne, nw: max(abs(d[i, nw] - s.north_nw_mm), abs(d[i, ne] - s.north_ne_mm))
     best = None
     for c in range(len(m)):
         near = np.flatnonzero(np.abs(d[c] - s.centre_rim_mm) < s.marker_tol_mm)
         for a, b in combinations(near, 2):
-            err = abs(d[a, b] - s.rim_rim_mm)
-            if err < s.marker_tol_mm and (best is None or err < best[0]):
-                best = (err, c, a, b)
+            if abs(d[a, b] - s.rim_rim_mm) >= s.marker_tol_mm:
+                continue
+            n = np.cross(m[a] - m[c], m[b] - m[c])
+            ne, nw = (a, b) if n[np.argmax(np.abs(n))] > 0 else (b, a)
+            north = min((north_err(i, ne, nw) for i in range(len(m)) if i not in (c, a, b)), default=np.inf)
+            err = (abs(d[a, b] - s.rim_rim_mm) + abs(d[c, a] - s.centre_rim_mm) + abs(d[c, b] - s.centre_rim_mm)
+                   + min(north, s.marker_tol_mm))
+            if best is None or err < best[0]:
+                best = (err, c, ne, nw)
     if best is None:
         return None
-    _, c, a, b = best
-    n = np.cross(m[a] - m[c], m[b] - m[c])
-    up = np.argmax(np.abs(n))
-    ne, nw = (a, b) if n[up] > 0 else (b, a)
+    _, c, ne, nw = best
+
+    # not the ball: the north marker (and any duplicate of it). Its mirror image across the
+    # 315°-45° line, 16 cm from the centre, has the same two distances, hence the centre check.
+    others = {i for i in set(range(len(m))) - {c, ne, nw}
+              if not (north_err(i, ne, nw) < NORTH_TOL_MM and d[i, c] > s.centre_rim_mm / 2)}
 
     # ball: nearest-to-the-board-face marker inside the rim (hands on the handles are outside)
     u, v, nrm = board_axes(m[c], m[ne], m[nw])
     ball, best_h = None, 80.0                                  # mm: at most this far off the face
-    for i in set(range(len(m))) - {c, ne, nw}:
+    for i in others:
         rel = m[i] - m[c]
         h = abs(rel @ nrm)
         if np.hypot(rel @ u, rel @ v) < (R_BOARD + 2) * 10 and h < best_h:

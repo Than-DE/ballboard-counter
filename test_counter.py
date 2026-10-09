@@ -37,6 +37,19 @@ def test_identify_any_orientation():
             assert found and np.allclose(xy, rot135(bu / 10, bv / 10)), (up, xy)
 
 
+def test_north_marker():
+    """4-marker board: the north rim marker is never taken for the ball, even with the centre hidden."""
+    c, u, v, up = np.zeros(3), np.array([1.0, 0, 0]), np.array([0, 1.0, 0]), np.array([0, 0, 1.0])
+    th = np.radians(47.7)                                # north: 47.7° from the 315° toward the 45° marker
+    nw, ne, north = c + 390 * u, c - 390 * v, c + 390 * (np.cos(th) * u - np.sin(th) * v)
+    ball = c + 200 * u + 150 * v + 15 * up
+    xy, found = C.ball_on_map(np.array([north, ne, ball, c, nw]), S)
+    assert found and np.allclose(xy, rot135(20, 15)), xy
+    # start of a trial: the ball sits on the centre marker and hides it
+    xy, _ = C.ball_on_map(np.array([north, ne, c + 5 * u + 25 * up, nw]), S)
+    assert xy is None or math.hypot(*xy) < 5, xy
+
+
 def test_gates():
     c = C.Counter(S)
     for i, a in enumerate(np.linspace(10, 370, 200)):    # one full lap at r = 25 cm
@@ -80,6 +93,7 @@ def test_real_take(path):
 
 if __name__ == "__main__":
     test_identify_any_orientation()
+    test_north_marker()
     test_gates()
     test_edges()
     for p in sys.argv[1:]:

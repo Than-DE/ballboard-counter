@@ -1,8 +1,11 @@
 # Ball-board counter
 
 Counts gate crossings and edge hits live while Motive is recording, from the board and
-ball markers alone. No rigid body, no 3D model: every frame it finds the board triangle
-among the unlabeled markers and treats the leftover marker on the board as the ball.
+ball markers alone. No rigid body, no 3D model: every frame it finds the board among the
+unlabeled markers (centre, 315° and 45° rim markers, plus the north rim marker in between)
+and treats the leftover marker on the board as the ball. The north marker tells the real
+board apart from a ball that rolls next to a rim marker and mimics it, and is never taken
+for the ball. Boards without it (the older 3-marker setup) still work.
 
 Score = gates × `gate_points` − edge hits × `edge_penalty` (1 and 0.5 by default).
 
@@ -86,11 +89,19 @@ Defaults, to confirm against the task's rules and your manual counts:
 | (direction) | both | both directions count; the log records cw/ccw |
 | `edge_hit_r` | 37 cm | the ball counts as hitting the edge beyond this radius (the measured maximum in the practice trial was 38.4 cm) |
 | `edge_rearm_r` | 35 cm | the ball must come back inside this before the next edge hit counts |
-| `centre_rim_mm`, `rim_rim_mm`, `marker_tol_mm` | 390, 556, 30 mm | the board marker triangle and how exact it must be |
+| `centre_rim_mm`, `rim_rim_mm` | 390, 556 mm | centre to rim marker, 315° to 45° marker |
+| `north_nw_mm`, `north_ne_mm` | 315, 285 mm | north rim marker to the 315° and 45° markers |
+| `marker_tol_mm` | 15 mm | how far the board distances may deviate (measured: within 5 mm) |
 | `max_gap_s` | 0.5 s | if the ball is lost longer than this, no crossing is counted across the gap |
 
-On `BallBoard_Marc_C_S1_T01_Practise.csv` the defaults give 78 gates and 19 edge hits (score 68.5).
+On `BallBoard_Marc_C_S1_T01_Practise.csv` the defaults give 78 gates and 18 edge hits (score 69).
+On the 4-marker pilot takes (`MATCH/data/Pilot data`) the ball position matches `MATCH/analysis/board.py`
+to within 1 cm in all but ~15 of ~187,000 frames.
 The edge thresholds are the ones to tune against manual counts. Restart the app after editing.
+
+An existing `settings.json` keeps its old values: after updating, set `marker_tol_mm` to 15 (it
+used to be 30, loose enough for the ball to pass as a rim marker) or delete the file so it is
+recreated with the defaults.
 
 ## Not yet tested
 
