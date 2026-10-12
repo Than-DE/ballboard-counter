@@ -7,6 +7,12 @@ The app takes the board's position from the labelled markers and projects the ba
 so marker IDs changing mid-trial no longer matter. The label is matched on the last part of
 the name (`Board:NE`, `NE`), upper or lower case; `Centre` also works.
 
+The window is the board (it grows with the window; F11 for full screen) and a sidebar of
+collapsible sections: Score, Trial, Markers (the four board markers and the ball, green when
+tracked, red when missing, with the same dots on the board), Motive connection, Replay a CSV,
+Manual correction and Events. Click a section title to fold it; the sidebar scrolls when the
+window is small.
+
 Score = gates × `gate_points` − edge hits × `edge_penalty` (1 and 0.5 by default).
 
 | File | What it is |

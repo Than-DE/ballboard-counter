@@ -30,13 +30,43 @@ SETTINGS = C.Settings.load(HERE / "settings.json")
 LOGS = HERE / "logs"
 RECENT = HERE / "recent.txt"            # last loaded CSVs, newest first, one path per line
 
-PX = 250 / 45                   # canvas pixels per cm
-SIZE = 520
+PX = 250 / 45                   # canvas pixels per cm before the first resize
+SIDE_W = 330                    # sidebar width in pixels at 96 dpi
 TRAIL_S = 1.5
 BALL, GATE_ON, EDGE_ON = "#eb6834", "#1baf7a", "#e0453a"
+OK, BAD, IDLE = "#1baf7a", "#e0453a", "#9a9a9a"      # marker present / missing / no data
+HEAD_BG = "#dcd9d2"
 MODES = {"idle": ("#6b6b6b", "NOT CONNECTED"),       # banner colour, label
          "live": ("#c62828", "● LIVE"),
          "replay": ("#1c5cab", "▶ REPLAY")}
+# the markers the app looks for: label, board row (see counter.ROLES), place on the board map (cm)
+_r, _d = C.R_BOARD, math.sqrt(.5) * C.R_BOARD
+BOARD_MARKERS = (("Center", 0, (0, 0)), ("North", 1, (0, _r)), ("NE", 2, (_d, _d)), ("NW", 3, (-_d, _d)))
+
+
+class Section(ttk.Frame):
+    """Collapsible sidebar section (like Blender's panels): click the header to fold it."""
+
+    def __init__(self, parent, title, open=True):
+        super().__init__(parent)
+        self.title, self.open = title, open
+        self.head = tk.Label(self, anchor="w", padx=8, pady=4, bg=HEAD_BG, fg="black", cursor="hand2",
+                             font=("Segoe UI", 10, "bold"))
+        self.head.pack(fill="x", pady=(8, 0))
+        self.head.bind("<Button-1>", lambda _e: self.toggle())
+        self.body = ttk.Frame(self, padding=(8, 6, 8, 2))
+        self._sync()
+
+    def toggle(self):
+        self.open = not self.open
+        self._sync()
+
+    def _sync(self):
+        self.head.configure(text=("▾  " if self.open else "▸  ") + self.title)
+        if self.open:
+            self.body.pack(fill="x")
+        else:
+            self.body.pack_forget()
 
 
 # --- frame sources: call on_frame(frame, t, (k,3) mm) from their own thread ---------------
@@ -165,6 +195,11 @@ class App:
         self.rate = deque()                     # arrival times of recent frames, for Hz
         self.status_bits = ""
         self.mode = "idle"
+        self.connecting = self.closing = False
+        self._tl_key = None
+        self.dirty = True                       # board view needs re-applying (set by every redraw)
+        self.xy, self.present = None, None      # latest ball on the map, and which of the 4 board markers are tracked
+        self.n_free = 0
         self.ticks = []                         # (time, timeline item) per counted event, replay only
         self.tot = {"gate": 0, "edge": 0}       # running totals of the events shown
         self.replay_t = None                    # (first, last) time of the file being replayed
@@ -176,35 +211,11 @@ class App:
 
     # layout
     def _build(self):
-        top = ttk.Frame(self.root, padding=8)
-        top.pack(fill="x")
-        ttk.Label(top, text="Motive IP").pack(side="left")
-        self.server = tk.StringVar(value="127.0.0.1")
-        self.conn_widgets = [ttk.Entry(top, textvariable=self.server, width=15)]
-        self.conn_widgets[-1].pack(side="left", padx=4)
-        ttk.Label(top, text="this PC").pack(side="left")
-        self.local = tk.StringVar(value="127.0.0.1")
-        self.conn_widgets.append(ttk.Entry(top, textvariable=self.local, width=15))
-        self.conn_widgets[-1].pack(side="left", padx=4)
-        self.multicast = tk.BooleanVar(value=False)
-        self.conn_widgets.append(ttk.Checkbutton(top, text="multicast", variable=self.multicast))
-        self.conn_widgets[-1].pack(side="left", padx=4)
-        self.connect_btn = ttk.Button(top, text="Connect", width=11, command=self.toggle_connect)
-        self.connect_btn.pack(side="left", padx=4)
-        ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=10)
-        self.replay_btn = ttk.Button(top, text="Replay CSV…", width=12, command=self.toggle_replay)
-        self.replay_btn.pack(side="left")
-        try:
-            self.recent = RECENT.read_text().splitlines()
-        except OSError:
-            self.recent = []
-        self.recent_btn = ttk.Button(top, text="▾", width=2, command=self.recent_menu)
-        self.recent_btn.pack(side="left")
-        self.speed = tk.StringVar(value="1x")
-        self.speed_box = ttk.Combobox(top, textvariable=self.speed, values=["1x", "2x", "5x", "20x"],
-                                      width=4, state="readonly")
-        self.speed_box.pack(side="left", padx=4)
-        self.speed_box.bind("<<ComboboxSelected>>", self.change_speed)
+        self.root.minsize(900, 600)
+        self.root.geometry("1280x820")
+        style = ttk.Style()
+        style.configure("Big.TButton", font=("Segoe UI", 11, "bold"), padding=6)
+        self.shown = {}                         # widget / canvas item -> last options set (skip no-op updates)
 
         # mode banner: which kind of data is on screen must be obvious at a glance
         self.banner = tk.Frame(self.root)
@@ -228,59 +239,179 @@ class App:
 
         mid = self.mid = ttk.Frame(self.root, padding=8)
         mid.pack(fill="both", expand=True)
-        self.canvas = tk.Canvas(mid, width=SIZE, height=SIZE, bg="white", highlightthickness=0)
-        self.canvas.pack(side="left")
+
+        # the board takes all the room the sidebar leaves; it is redrawn to fit on every resize
+        self.canvas = tk.Canvas(mid, width=400, height=400, bg="white", highlightthickness=0)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.canvas.bind("<Configure>", self._on_resize)
+        self._redraw_id = None
+        self.cx, self.cy, self.px = 200, 200, PX
+        self._build_sidebar(mid)
         self._draw_board()
+        self.root.bind("<F11>", lambda _e: self.root.attributes("-fullscreen", not self.root.attributes("-fullscreen")))
+        self.root.bind("<Escape>", lambda _e: self.root.attributes("-fullscreen", False))
 
-        side = ttk.Frame(mid, padding=(16, 0))
-        side.pack(side="left", fill="y")
+    def _build_sidebar(self, parent):
+        """Scrollable column of collapsible sections: Score, Trial, Markers, Connection, Replay, Manual, Events."""
+        width = int(SIDE_W * self.root.winfo_fpixels("1i") / 96)
+        box = ttk.Frame(parent)
+        box.pack(side="right", fill="y", padx=(8, 0))
+        sc = self.side_canvas = tk.Canvas(box, width=width, highlightthickness=0,
+                                          bg=ttk.Style().lookup("TFrame", "background"))
+        bar = ttk.Scrollbar(box, orient="vertical", command=sc.yview)
+        sc.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        sc.pack(side="left", fill="y")
+        inner = ttk.Frame(sc)
+        sc.create_window((0, 0), window=inner, anchor="nw", width=width)
+        inner.bind("<Configure>", lambda _e: sc.configure(scrollregion=sc.bbox("all")))
+
+        def wheel(e):                           # scroll the sidebar when the pointer is over it
+            w = self.root.winfo_containing(e.x_root, e.y_root)
+            if w is not None and str(w).startswith(str(box)):
+                sc.yview_scroll(-1 if e.delta > 0 else 1, "units")
+        self.root.bind_all("<MouseWheel>", wheel)
+
+        # score
+        sec = Section(inner, "Score")
+        sec.pack(fill="x")
+        row = ttk.Frame(sec.body)
+        row.pack(fill="x")
         self.numbers = {}
-        for key, label in (("gates", "Gates"), ("edges", "Edge hits"), ("score", "Score")):
-            ttk.Label(side, text=label, font=("Segoe UI", 12)).pack(anchor="w")
-            self.numbers[key] = ttk.Label(side, text="0", font=("Segoe UI", 34, "bold"))
-            self.numbers[key].pack(anchor="w", pady=(0, 8))
-        ttk.Label(side, text="Trial name").pack(anchor="w")
+        for i, (key, label) in enumerate((("gates", "Gates"), ("edges", "Edge hits"), ("score", "Score"))):
+            col = ttk.Frame(row)
+            col.pack(side="left", expand=True, fill="x")
+            ttk.Label(col, text=label).pack()
+            self.numbers[key] = ttk.Label(col, text="0", font=("Segoe UI", 28, "bold"))
+            self.numbers[key].pack()
+
+        # trial
+        sec = Section(inner, "Trial")
+        sec.pack(fill="x")
+        ttk.Label(sec.body, text="Name (used for the log file)").pack(anchor="w")
         self.trial = tk.StringVar(value="trial")
-        ttk.Entry(side, textvariable=self.trial, width=22).pack(anchor="w", pady=(0, 8))
-        row = ttk.Frame(side)
-        row.pack(anchor="w")
-        self.start_btn = ttk.Button(row, text="Start", command=self.start)
-        self.start_btn.pack(side="left")
-        ttk.Button(row, text="Stop", command=self.stop).pack(side="left", padx=4)
-        ttk.Label(side, text="Manual correction", padding=(0, 14, 0, 2)).pack(anchor="w")
-        for kind in ("gate", "edge"):
-            row = ttk.Frame(side)
-            row.pack(anchor="w", pady=2)
-            for delta in (+1, -1):
-                ttk.Button(row, text=f"{delta:+d} {kind}", width=8,
-                           command=lambda k=kind, d=delta: self.manual(k, d)).pack(side="left", padx=(0, 4))
+        ttk.Entry(sec.body, textvariable=self.trial).pack(fill="x", pady=(2, 8))
+        row = ttk.Frame(sec.body)
+        row.pack(fill="x")
+        self.start_btn = ttk.Button(row, text="Start", style="Big.TButton", command=self.start)
+        self.start_btn.pack(side="left", expand=True, fill="x")
+        self.stop_btn = ttk.Button(row, text="Stop", style="Big.TButton", command=self.stop, state="disabled")
+        self.stop_btn.pack(side="left", expand=True, fill="x", padx=(6, 0))
 
-        self.events = tk.Listbox(self.root, height=6, font=("Consolas", 10))
-        self.events.pack(fill="x", padx=8, pady=(0, 8))
+        # markers: what the app looks for, and whether it sees it
+        sec = Section(inner, "Markers")
+        sec.pack(fill="x")
+        self.marker_rows = {}
+        for name in [m[0] for m in BOARD_MARKERS] + ["Ball"]:
+            row = ttk.Frame(sec.body)
+            row.pack(fill="x", pady=1)
+            dot = tk.Label(row, text="●", fg=IDLE, font=("Segoe UI", 12))
+            dot.pack(side="left")
+            ttk.Label(row, text=name, width=8).pack(side="left", padx=(4, 0))
+            state = ttk.Label(row, text="—")
+            state.pack(side="left")
+            self.marker_rows[name] = (dot, state)
+        self.marker_note = ttk.Label(sec.body, text="", wraplength=width - 40)
+        self.marker_note.pack(anchor="w", pady=(6, 0))
 
+        # connection
+        sec = Section(inner, "Motive connection")
+        sec.pack(fill="x")
+        self.server, self.local = tk.StringVar(value="127.0.0.1"), tk.StringVar(value="127.0.0.1")
+        self.multicast = tk.BooleanVar(value=False)
+        self.conn_widgets = []
+        grid = ttk.Frame(sec.body)
+        grid.pack(fill="x")
+        grid.columnconfigure(1, weight=1)
+        for r, (label, var) in enumerate((("Motive IP", self.server), ("This PC", self.local))):
+            ttk.Label(grid, text=label).grid(row=r, column=0, sticky="w", pady=2)
+            self.conn_widgets.append(ttk.Entry(grid, textvariable=var))
+            self.conn_widgets[-1].grid(row=r, column=1, sticky="ew", padx=(8, 0), pady=2)
+        self.conn_widgets.append(ttk.Checkbutton(sec.body, text="multicast", variable=self.multicast))
+        self.conn_widgets[-1].pack(anchor="w", pady=2)
+        self.connect_btn = ttk.Button(sec.body, text="Connect", style="Big.TButton", command=self.toggle_connect)
+        self.connect_btn.pack(fill="x", pady=(4, 0))
+
+        # replay
+        sec = Section(inner, "Replay a CSV")
+        sec.pack(fill="x")
+        try:
+            self.recent = RECENT.read_text().splitlines()
+        except OSError:
+            self.recent = []
+        row = ttk.Frame(sec.body)
+        row.pack(fill="x")
+        self.replay_btn = ttk.Button(row, text="Open CSV…", command=self.toggle_replay)
+        self.replay_btn.pack(side="left", expand=True, fill="x")
+        self.recent_btn = ttk.Button(row, text="Recent ▾", command=self.recent_menu)
+        self.recent_btn.pack(side="left", padx=(6, 0))
+        row = ttk.Frame(sec.body)
+        row.pack(fill="x", pady=(6, 0))
+        ttk.Label(row, text="Speed").pack(side="left")
+        self.speed = tk.StringVar(value="1x")
+        self.speed_box = ttk.Combobox(row, textvariable=self.speed, values=["1x", "2x", "5x", "20x"],
+                                      width=5, state="readonly")
+        self.speed_box.pack(side="left", padx=8)
+        self.speed_box.bind("<<ComboboxSelected>>", self.change_speed)
+
+        # manual correction
+        sec = Section(inner, "Manual correction")
+        sec.pack(fill="x")
+        self.manual_btns = []
+        for r, kind in enumerate(("gate", "edge")):
+            for c, delta in enumerate((+1, -1)):
+                b = ttk.Button(sec.body, text=f"{delta:+d} {kind}", state="disabled",
+                               command=lambda k=kind, d=delta: self.manual(k, d))
+                b.grid(row=r, column=c, sticky="ew", padx=2, pady=2)
+                self.manual_btns.append(b)
+            sec.body.columnconfigure(r, weight=1)
+
+        # events
+        sec = Section(inner, "Events")
+        sec.pack(fill="x", pady=(0, 8))
+        self.events = tk.Listbox(sec.body, height=9, font=("Consolas", 10))
+        self.events.pack(fill="x")
+
+    # board canvas: everything is placed from cx, cy and px (pixels per cm), set on each resize
     def _xy(self, x, y):
-        return SIZE / 2 + x * PX, SIZE / 2 - y * PX
+        return self.cx + x * self.px, self.cy - y * self.px
 
-    def _circle(self, r, **kw):
-        (x0, y0), (x1, y1) = self._xy(-r, r), self._xy(r, -r)
+    def _circle(self, r, centre=(0, 0), **kw):
+        (x0, y0), (x1, y1) = self._xy(centre[0] - r, centre[1] + r), self._xy(centre[0] + r, centre[1] - r)
         return self.canvas.create_oval(x0, y0, x1, y1, **kw)
 
+    def _on_resize(self, _event):
+        if self._redraw_id:
+            self.root.after_cancel(self._redraw_id)
+        self._redraw_id = self.root.after(40, self._draw_board)     # once the dragging pauses
+
     def _draw_board(self):
-        self.rim = self._circle(C.R_BOARD, fill="#8a8477", outline="peru", width=4)
+        self._redraw_id = None
+        c = self.canvas
+        c.delete("all")
+        self.flash.clear()
+        w, h = max(c.winfo_width(), 100), max(c.winfo_height(), 100)
+        self.cx, self.cy = w / 2, h / 2 - 8
+        self.px = min(w / 2, self.cy) / 46                          # 39 cm board plus a margin
+        self.rim = self._circle(C.R_BOARD, fill="#8a8477", outline="peru", width=max(2, self.px / 3))
         self._circle(SETTINGS.gate_r_max, outline="white", dash=(2, 3))
         self._circle(SETTINGS.gate_r_min, outline="white", dash=(2, 3))
         self._circle(SETTINGS.edge_hit_r, outline="#e0453a", dash=(1, 4))
         self.gate_lines = {}
+        font = ("Segoe UI", max(8, int(self.px * 1.1)))
         for g in C.GATES:
             a = math.radians(g)
             p0 = self._xy(SETTINGS.gate_r_min * math.sin(a), SETTINGS.gate_r_min * math.cos(a))
             p1 = self._xy(SETTINGS.gate_r_max * math.sin(a), SETTINGS.gate_r_max * math.cos(a))
-            self.gate_lines[g] = self.canvas.create_line(*p0, *p1, fill="white", width=4)
-            self.canvas.create_text(*self._xy(34 * math.sin(a), 34 * math.cos(a)), text=f"{g}°",
-                                    fill="white", font=("Segoe UI", 9))
-        self.canvas.create_text(SIZE / 2, SIZE - 12, text="participant", fill="black", font=("Segoe UI", 10))
-        self.trail_line = self.canvas.create_line(0, 0, 0, 0, fill=BALL, width=3, state="hidden")
+            self.gate_lines[g] = c.create_line(*p0, *p1, fill="white", width=max(3, self.px / 2))
+            c.create_text(*self._xy(34 * math.sin(a), 34 * math.cos(a)), text=f"{g}°", fill="white", font=font)
+        c.create_text(w / 2, h - 12, text="participant", fill="black", font=font)
+        # the four board markers at their places on the rim, coloured by whether they are tracked
+        self.marker_items = {name: self._circle(1.3, centre=pos, fill=IDLE, outline="black")
+                             for name, _, pos in BOARD_MARKERS}
+        self.trail_line = c.create_line(0, 0, 0, 0, fill=BALL, width=max(2, self.px / 2.5), state="hidden")
         self.ball = self._circle(1.6, fill=BALL, outline="black", state="hidden")
+        self.dirty = True                                           # poll() re-applies ball, trail, markers
 
     # frames (source thread)
     def on_frame(self, frame, t, markers):
@@ -288,9 +419,10 @@ class App:
             self.q.put(("end",))
             return
         xy, board = C.ball_on_map(markers)
+        present = tuple(~np.isnan(markers[0]).any(axis=1))
         with self.lock:
             events = self.counter.update(t, frame, xy) if self.running else []
-        self.q.put(("frame", frame, t, xy, board, len(markers[1]), events))
+        self.q.put(("frame", frame, t, xy, present, len(markers[1]), events))
 
     def on_seek(self, i):
         """Replay jumped to frame i: recount frames 0..i-1 so the totals match a straight play.
@@ -312,6 +444,16 @@ class App:
         self.q.put(("seek", recounted))
 
     # UI loop (main thread)
+    def _set(self, target, **kw):
+        """Configure a widget (or canvas item) only if the options changed: no-op updates cost a relayout."""
+        key = tuple(sorted(kw.items()))
+        if self.shown.get(target) != key:
+            self.shown[target] = key
+            if isinstance(target, int):
+                self.canvas.itemconfigure(target, **kw)
+            else:
+                target.configure(**kw)
+
     def poll(self):
         latest = None
         try:
@@ -320,11 +462,18 @@ class App:
                 if msg[0] == "end":
                     self.stop()
                     self._disconnect("replay finished")
+                    latest = None               # frames queued before the end must not revive the view
                     continue
                 if msg[0] == "seek":
                     self._rebuild(msg[1])
                     continue
-                _, frame, t, xy, board, n, events = msg
+                if msg[0] == "connected":
+                    self._connected(*msg[1:])
+                    continue
+                if msg[0] == "connect_failed":
+                    self._connect_failed(msg[1])
+                    continue
+                _, frame, t, xy, present, n, events = msg
                 latest = msg
                 if self.running and self.t_start is None:
                     self.t_start = t
@@ -342,24 +491,19 @@ class App:
         while self.rate and now - self.rate[0] > 1:
             self.rate.popleft()
         if latest:
-            _, frame, t, xy, board, n, _ = latest
+            _, frame, t, self.xy, self.present, self.n_free, _ = latest
             self.last = (frame, t)
             while self.trail and t - self.trail[0][0] > TRAIL_S:
                 self.trail.popleft()
-            pts = [c for _, p in self.trail for c in self._xy(*p)]
-            self.canvas.itemconfigure(self.trail_line, state="normal" if len(pts) >= 4 else "hidden")
-            if len(pts) >= 4:
-                self.canvas.coords(self.trail_line, *pts)
-            if xy is not None:
-                (x0, y0), (x1, y1) = self._xy(xy[0] - 1.6, xy[1] + 1.6), self._xy(xy[0] + 1.6, xy[1] - 1.6)
-                self.canvas.coords(self.ball, x0, y0, x1, y1)
-            self.canvas.itemconfigure(self.ball, state="normal" if xy is not None else "hidden")
-            self.status_bits = (f"{n} unlabeled markers · board {'✓' if board else '✗'} · "
-                                f"ball {'✓' if xy is not None else '✗'} · frame {frame}")
+        if latest or self.dirty:
+            self._draw_view()
+        self._show_markers(live_gap=self.mode == "live" and not self.rate)
         replaying = isinstance(self.source, ReplaySource)
-        if self.source is not None:
+        if self.connecting:
+            self._set(self.status, text="connecting…")
+        elif self.source is not None:
             state = "   ⏸ PAUSED" if replaying and self.source.paused else ("   ▶ COUNTING" if self.running else "")
-            self.status.configure(text=f"{self.source_name} · {len(self.rate)} Hz · {self.status_bits}{state}")
+            self._set(self.status, text=f"{self.source_name} · {len(self.rate)} Hz · frame {self.last[0]}{state}")
         if self.replay_t is not None:
             self._draw_timeline()
         for item, until in list(self.flash.items()):
@@ -367,6 +511,41 @@ class App:
                 self.canvas.itemconfigure(item, **({"outline": "peru"} if item == self.rim else {"fill": "white"}))
                 del self.flash[item]
         self.root.after(33, self.poll)
+
+    def _draw_view(self):
+        """Ball, trail and board-marker dots on the canvas, from the latest frame."""
+        self.dirty = False
+        pts = [c for _, p in self.trail for c in self._xy(*p)]
+        self._set(self.trail_line, state="normal" if len(pts) >= 4 else "hidden")
+        if len(pts) >= 4:
+            self.canvas.coords(self.trail_line, *pts)
+        if self.xy is not None:
+            (x0, y0), (x1, y1) = (self._xy(self.xy[0] - 1.6, self.xy[1] + 1.6),
+                                  self._xy(self.xy[0] + 1.6, self.xy[1] - 1.6))
+            self.canvas.coords(self.ball, x0, y0, x1, y1)
+        self._set(self.ball, state="normal" if self.xy is not None else "hidden")
+
+    def _show_markers(self, live_gap):
+        """Markers section and the dots on the board: which of the markers we look for are tracked."""
+        have = self.present is not None and not live_gap
+        for name, row, _ in BOARD_MARKERS:
+            ok = have and bool(self.present[row])
+            colour = (OK if ok else BAD) if have else IDLE
+            self._set(self.marker_rows[name][0], fg=colour)
+            self._set(self.marker_rows[name][1], text="tracked" if ok else "MISSING" if have else "—")
+            self._set(self.marker_items[name], fill=colour)
+        ball = have and self.xy is not None
+        self._set(self.marker_rows["Ball"][0], fg=(OK if ball else BAD) if have else IDLE)
+        self._set(self.marker_rows["Ball"][1], text="on the board" if ball else "not found" if have else "—")
+        if live_gap:
+            note = "No frames arriving. Is Motive streaming (Settings > Streaming > Enable)?"
+        elif isinstance(self.source, LiveSource) and self.source.board is None:
+            note = "Waiting for Motive's marker names. Is the board a rigid body with its markers labelled Center, North, NE, NW?"
+        elif have:
+            note = f"Unlabeled markers seen: {self.n_free} (the ball is the one on the board)"
+        else:
+            note = "The board's rigid body markers must be labelled Center, North, NE, NW in Motive."
+        self._set(self.marker_note, text=note)
 
     def _show_event(self, ev):
         """A new event: add it everywhere and flash the gate or rim."""
@@ -423,28 +602,50 @@ class App:
 
     # connecting
     def toggle_connect(self):
+        if self.connecting:
+            return
         if self.source is not None:
             self._disconnect("disconnected")
             return
-        try:
-            src = LiveSource(self.server.get(), self.local.get(), self.multicast.get(), self.on_frame)
-            self.status.configure(text="connecting…")
-            self.root.update_idletasks()
-            src.start()
-        except ImportError:
-            messagebox.showerror("Missing package", "The 'natnet' package is not installed.")
+        server, local = self.server.get().strip(), self.local.get().strip()
+        if not server or not local:
+            messagebox.showwarning("Connect", "Enter both IP addresses first (Motive IP and this PC).")
             return
+        self.connecting = True
+        self._set_mode("idle")
+        threading.Thread(target=self._connect, args=(server, local, self.multicast.get()), daemon=True).start()
+
+    def _connect(self, server, local, multicast):
+        """Worker thread: connecting can take seconds (timeout 5 s) and must not freeze the window."""
+        try:
+            src = LiveSource(server, local, multicast, self.on_frame)
+            src.start()
         except Exception as ex:
+            self.q.put(("connect_failed", ex))
+        else:
+            self.q.put(("connected", src, server))
+
+    def _connected(self, src, server):
+        self.connecting = False
+        if self.closing:
+            src.stop()
+            return
+        self.source, self.source_name = src, f"Motive {server}"
+        self._set_mode("live")
+        self.replay_t = None
+        self.replay_bar.pack_forget()
+
+    def _connect_failed(self, ex):
+        self.connecting = False
+        self._set_mode("idle")
+        self._set(self.status, text="not connected")
+        if isinstance(ex, ImportError):
+            messagebox.showerror("Missing package", "The 'natnet' package is not installed.")
+        else:
             messagebox.showerror("Could not connect", f"{type(ex).__name__}: {ex}\n\nCheck that Motive is "
                                  "streaming (Settings > Streaming > Enable), that the IP addresses match "
                                  "Motive's streaming interface, the multicast setting matches, and that "
                                  "Windows Firewall allows this app.")
-            self.status.configure(text="not connected")
-            return
-        self.source, self.source_name = src, f"Motive {self.server.get()}"
-        self._set_mode("live")
-        self.replay_t = None
-        self.replay_bar.pack_forget()
 
     def replay(self, path=None):
         """Count a recorded trial: plays the whole CSV export as a trial named after the file."""
@@ -453,11 +654,15 @@ class App:
             return
         if self.source is not None:
             self._disconnect("")
+        self.root.configure(cursor="watch")
+        self.root.update_idletasks()
         try:
             src = ReplaySource(path, float(self.speed.get().rstrip("x")), self.on_frame, self.on_seek)
         except Exception as ex:
             messagebox.showerror("Could not read file", f"{type(ex).__name__}: {ex}")
             return
+        finally:
+            self.root.configure(cursor="")
         self.replay_name = Path(path).name
         self.recent = [path] + [f for f in self.recent if f != path][:9]
         try:
@@ -496,14 +701,15 @@ class App:
         self.mode_label.configure(text=text, fg="white")
         self.status.configure(fg="white")
         self.root.title(f"Ball-board counter — {text}")
+        idle = mode == "idle" and not self.connecting
         for w in self.conn_widgets:
-            w.configure(state="normal" if mode == "idle" else "disabled")
-        self.connect_btn.configure(text="Disconnect" if mode == "live" else "Connect",
-                                   state="disabled" if mode == "replay" else "normal")
-        self.replay_btn.configure(text="■ Stop replay" if mode == "replay" else "Replay CSV…",
-                                  state="disabled" if mode == "live" else "normal")
-        self.speed_box.configure(state="disabled" if mode == "live" else "readonly")
-        self.recent_btn.configure(state="disabled" if mode == "live" else "normal")
+            w.configure(state="normal" if idle else "disabled")
+        self.connect_btn.configure(text="Connecting…" if self.connecting else "Disconnect" if mode == "live" else "Connect",
+                                   state="disabled" if mode == "replay" or self.connecting else "normal")
+        self.replay_btn.configure(text="■ Stop replay" if mode == "replay" else "Open CSV…",
+                                  state="normal" if idle or mode == "replay" else "disabled")
+        self.speed_box.configure(state="readonly" if idle or mode == "replay" else "disabled")
+        self.recent_btn.configure(state="normal" if idle else "disabled")
 
     def toggle_replay(self):
         if self.mode == "replay":
@@ -527,6 +733,10 @@ class App:
         w = max(self.timeline.winfo_width(), 1)
         x = lambda t: (t - t0) / (t1 - t0) * w
         now = min(max(self.last[1], t0), t1)
+        key = (round(now, 2), w, len(self.ticks))
+        if key == self._tl_key:
+            return
+        self._tl_key = key
         self.timeline.coords(self.tl_done, 0, 0, x(now), 28)
         self.timeline.coords(self.tl_head, x(now), 0, x(now), 28)
         for t, item in self.ticks:                  # re-placed every time: survives window resizes
@@ -538,6 +748,8 @@ class App:
         if self.source is not None:
             self.source.stop()
         self.source = None
+        self.present, self.xy = None, None
+        self.dirty = True
         self.pause_btn.configure(text="⏸ Pause", state="disabled")
         self._set_mode("idle")
         self.status.configure(text=why or "not connected")
@@ -559,6 +771,9 @@ class App:
         kind = "replay" if self.mode == "replay" else "live"
         self._open_log(LOGS / f"{name}_{kind}_{stamp}.csv")
         self.start_btn.configure(state="disabled")
+        self.stop_btn.configure(state="normal")
+        for b in self.manual_btns:
+            b.configure(state="normal")
 
     def _open_log(self, path):
         """(Re)write the log file from scratch: header now, rows as events come."""
@@ -576,6 +791,9 @@ class App:
             self.log.close()
             self.log = None
         self.start_btn.configure(state="normal")
+        self.stop_btn.configure(state="disabled")
+        for b in self.manual_btns:
+            b.configure(state="disabled")
 
     def manual(self, kind, delta):
         if not self.running:
@@ -585,6 +803,7 @@ class App:
         self._show_event(ev)
 
     def close(self):
+        self.closing = True
         self.stop()
         if self.source is not None:
             self.source.stop()
@@ -610,7 +829,7 @@ Motive 2: Data Streaming pane):
 • transmission type: Unicast (leave multicast unticked here)
 • stream labeled and unlabeled markers
 • the board is a rigid body whose markers are labelled Center, North, NE and NW (Labels pane)
-Then enter the same IPs here and press Connect."""
+Then enter the same IPs under "Motive connection" and press Connect.\n\nPress F11 for full screen; the board grows with the window. The sidebar sections fold when you click their titles."""
 
 
 def about():
@@ -618,6 +837,12 @@ def about():
 
 
 if __name__ == "__main__":
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)      # else Windows scales the whole window as a bitmap
+        except Exception:
+            pass
     root = tk.Tk()
     if sys.platform == "darwin":
         root.createcommand("tkAboutDialog", about)      # app menu > About BallBoardCounter
