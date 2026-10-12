@@ -286,12 +286,15 @@ class App:
             ttk.Label(col, text=label).pack()
             self.numbers[key] = ttk.Label(col, text="0", font=("Segoe UI", 28, "bold"))
             self.numbers[key].pack()
+        self.clear_btn = ttk.Button(sec.body, text="Clear score", command=self.clear)
+        self.clear_btn.pack(fill="x", pady=(8, 0))
 
         # trial
         sec = Section(inner, "Trial")
         sec.pack(fill="x")
         ttk.Label(sec.body, text="Name (used for the log file)").pack(anchor="w")
-        self.trial = tk.StringVar(value="trial")
+        self.auto_name = self.now_name()        # default name; a fresh one for each trial unless you typed your own
+        self.trial = tk.StringVar(value=self.auto_name)
         ttk.Entry(sec.body, textvariable=self.trial).pack(fill="x", pady=(2, 8))
         self.follow = tk.BooleanVar(value=True)
         ttk.Checkbutton(sec.body, text="Start and stop with Motive's recording (live)",
@@ -738,6 +741,7 @@ class App:
                                   state="normal" if idle or mode == "replay" else "disabled")
         self.speed_box.configure(state="readonly" if idle or mode == "replay" else "disabled")
         self.recent_btn.configure(state="normal" if idle else "disabled")
+        self.clear_btn.configure(state="disabled" if mode == "replay" else "normal")
 
     def toggle_replay(self):
         if self.mode == "replay":
@@ -783,9 +787,16 @@ class App:
         self.status.configure(text=why or "not connected")
 
     # trial control
+    @staticmethod
+    def now_name():
+        return datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
     def start(self):
         if self.running:
             return
+        if self.mode != "replay" and self.trial.get().strip() in ("", self.auto_name):
+            self.auto_name = self.now_name()
+            self.trial.set(self.auto_name)
         with self.lock:
             self.counter.reset()
             self.running = True
@@ -797,7 +808,8 @@ class App:
         stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         name = "".join(ch for ch in self.trial.get() if ch.isalnum() or ch in "-_") or "trial"
         kind = "replay" if self.mode == "replay" else "live"
-        self._open_log(LOGS / f"{name}_{kind}_{stamp}.csv")
+        tag = "" if name == self.auto_name else f"_{stamp}"       # the default name already is a timestamp
+        self._open_log(LOGS / f"{name}_{kind}{tag}.csv")
         self.start_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
         for b in self.manual_btns:
@@ -811,6 +823,24 @@ class App:
         cols = [f.name for f in fields(C.Event)] + ["t_trial", "gates", "edges", "score"]
         self.log_writer = csv.DictWriter(self.log, fieldnames=cols)
         self.log_writer.writeheader()
+
+    def clear(self):
+        """Zero the score and the event list. A running trial restarts (new log file); the old log stays on disk."""
+        if self.tot["gate"] or self.tot["edge"] or self.events.size():
+            note = "\nThe running trial restarts with a new log file." if self.running else ""
+            if not messagebox.askyesno("Clear score", "Clear the score and the event list?" + note):
+                return
+        was, auto = self.running, self.auto
+        self.stop()
+        with self.lock:
+            self.counter.reset()
+        self.tot = {"gate": 0, "edge": 0}
+        self.events.delete(0, "end")
+        self.trail.clear()
+        self._show_totals()
+        if was:
+            self.start()
+            self.auto = auto                    # still follows Motive's recording if it started the trial
 
     def stop(self):
         self.auto = False

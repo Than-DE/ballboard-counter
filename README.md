@@ -17,7 +17,9 @@ window is small.
 flag in every frame), so each take gets its own log. Tick that off, or just press **Start** and
 **Stop**, for a manual trial that needs no recording in Motive. A trial you start by hand is
 never stopped by Motive, and connecting while Motive is already recording starts nothing
-(press Start). The log is named after the Trial name field plus a timestamp.
+(press Start). The Trial name defaults to the date and time, fresh for each trial (type your own to keep it;
+the log then gets a timestamp appended). **Clear score** zeroes the score and event list; during
+a trial it restarts the trial with a new log file, and the old log stays on disk.
 
 Score = gates × `gate_points` − edge hits × `edge_penalty` (1 and 0.5 by default).
 
