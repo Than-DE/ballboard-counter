@@ -18,9 +18,9 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt pyinstaller
+      - run: pip install -r requirements.txt pyinstaller pillow
       - run: python test_counter.py
-      - run: pyinstaller --noconfirm --onefile --windowed --name BallBoardCounter --hidden-import natnet app.py
+      - run: pyinstaller --noconfirm --onefile --windowed --name BallBoardCounter --hidden-import natnet --icon icon.png --add-data icon.png:. app.py
       - uses: actions/upload-artifact@v7
         with:
           name: BallBoardCounter

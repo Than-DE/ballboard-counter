@@ -17,6 +17,7 @@ Score = gates × `gate_points` − edge hits × `edge_penalty` (1 and 0.5 by def
 | `settings.json` | scoring rules and thresholds, created next to the app on first start |
 | `build_exe.bat` | builds `dist\BallBoardCounter.exe` on Windows |
 | `.github/workflows/build-exe.yml` | the same build on GitHub's Windows machines |
+| `icon.png`, `make_icon.py` | the app icon (the board schematic) and the script that draws it |
 
 ## Getting the .exe
 
@@ -33,6 +34,12 @@ Two ways:
 
 The Motive PC then only needs `BallBoardCounter.exe`. It creates `settings.json` and a
 `logs\` folder next to itself, so put it in a folder you can write to (not Program Files).
+
+**On a Mac** (for replaying CSVs; same steps, an `.app` instead of an exe):
+`python3 -m venv .venv && .venv/bin/pip install -r requirements.txt pyinstaller pillow`, then
+`.venv/bin/pyinstaller --noconfirm --windowed --name BallBoardCounter --hidden-import natnet --icon icon.png --add-data icon.png:. app.py`
+and copy `dist/BallBoardCounter.app` to `/Applications`. The Mac app keeps `settings.json`,
+`logs/` and `recent.txt` in `~/Documents/BallBoardCounter`.
 
 To run from source instead: `py -m venv .venv`, `.venv\Scripts\pip install -r requirements.txt`,
 `.venv\Scripts\python app.py`.
@@ -62,7 +69,7 @@ Every event is written immediately to `logs\<trial>_live_<date>_<time>.csv` (tim
 number, gate and direction, running totals). The frame number lines events up with the
 recorded take.
 
-**Replay CSV…** counts a previous trial: pick the speed (1× to 20×), then a Motive CSV export
+**Replay CSV…** (or the ▾ next to it, a menu of the last 10 loaded files) counts a previous trial: pick the speed (1× to 20×), then a Motive CSV export
 (in Motive: export the take's tracking data as CSV, with markers). The whole file is counted as
 one trial named after the file, and its log is saved like a live one. A timeline above the board
 shows how far the replay is, with a tick per counted gate (green, top) and edge hit (red, bottom);

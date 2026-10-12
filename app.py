@@ -22,8 +22,13 @@ import numpy as np
 import counter as C
 
 HERE = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
+if getattr(sys, "frozen", False) and sys.platform == "darwin":   # never write inside the .app bundle
+    HERE = Path.home() / "Documents" / "BallBoardCounter"
+    HERE.mkdir(parents=True, exist_ok=True)
+ICON = Path(getattr(sys, "_MEIPASS", Path(__file__).parent)) / "icon.png"   # bundled by PyInstaller --add-data
 SETTINGS = C.Settings.load(HERE / "settings.json")
 LOGS = HERE / "logs"
+RECENT = HERE / "recent.txt"            # last loaded CSVs, newest first, one path per line
 
 PX = 250 / 45                   # canvas pixels per cm
 SIZE = 520
@@ -158,6 +163,12 @@ class App:
         ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=10)
         self.replay_btn = ttk.Button(top, text="Replay CSV…", width=12, command=self.toggle_replay)
         self.replay_btn.pack(side="left")
+        try:
+            self.recent = RECENT.read_text().splitlines()
+        except OSError:
+            self.recent = []
+        self.recent_btn = ttk.Button(top, text="▾", width=2, command=self.recent_menu)
+        self.recent_btn.pack(side="left")
         self.speed = tk.StringVar(value="1x")
         self.speed_box = ttk.Combobox(top, textvariable=self.speed, values=["1x", "2x", "5x", "20x"],
                                       width=4, state="readonly")
@@ -288,6 +299,8 @@ class App:
                     self.t_start = t
                 self.rate.append(time.monotonic())
                 if xy is not None:
+                    if self.trail and t < self.trail[-1][0]:    # time went back: new CSV or source, wipe the old trail
+                        self.trail.clear()
                     self.trail.append((t, xy))
                 for ev in events:
                     self._show_event(ev)
@@ -402,9 +415,9 @@ class App:
         self.replay_t = None
         self.replay_bar.pack_forget()
 
-    def replay(self):
+    def replay(self, path=None):
         """Count a recorded trial: plays the whole CSV export as a trial named after the file."""
-        path = filedialog.askopenfilename(title="Motive CSV export", filetypes=[("CSV", "*.csv")])
+        path = path or filedialog.askopenfilename(title="Motive CSV export", filetypes=[("CSV", "*.csv")])
         if not path:
             return
         if self.source is not None:
@@ -415,6 +428,11 @@ class App:
             messagebox.showerror("Could not read file", f"{type(ex).__name__}: {ex}")
             return
         self.replay_name = Path(path).name
+        self.recent = [path] + [f for f in self.recent if f != path][:9]
+        try:
+            RECENT.write_text("\n".join(self.recent))
+        except OSError:
+            pass                                # only a convenience, never block a replay on it
         self.source, self.source_name = src, f"{self.replay_name} · {self.speed.get()}"
         self._set_mode("replay")
         for _, item in self.ticks:
@@ -427,6 +445,16 @@ class App:
         self.trial.set(Path(path).stem)
         self.start()
         src.start()
+
+    def recent_menu(self):
+        """Native popup menu of the last loaded CSVs, under the ▾ button."""
+        menu = tk.Menu(self.root, tearoff=0)
+        for f in self.recent:
+            menu.add_command(label=Path(f).name, command=lambda f=f: self.replay(f))
+        if not self.recent:
+            menu.add_command(label="No recent files", state="disabled")
+        b = self.recent_btn
+        menu.tk_popup(b.winfo_rootx(), b.winfo_rooty() + b.winfo_height())
 
     def _set_mode(self, mode):
         """idle / live / replay: banner colour and which controls make sense."""
@@ -444,6 +472,7 @@ class App:
         self.replay_btn.configure(text="■ Stop replay" if mode == "replay" else "Replay CSV…",
                                   state="disabled" if mode == "live" else "normal")
         self.speed_box.configure(state="disabled" if mode == "live" else "readonly")
+        self.recent_btn.configure(state="disabled" if mode == "live" else "normal")
 
     def toggle_replay(self):
         if self.mode == "replay":
@@ -533,5 +562,9 @@ class App:
 
 if __name__ == "__main__":
     root = tk.Tk()
+    try:
+        root.iconphoto(True, tk.PhotoImage(file=ICON))
+    except tk.TclError:
+        pass                                    # no icon file (e.g. a source copy without it)
     App(root)
     root.mainloop()
