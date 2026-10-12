@@ -1,11 +1,11 @@
 # Ball-board counter
 
-Counts gate crossings and edge hits live while Motive is recording, from the board and
-ball markers alone. No rigid body, no 3D model: every frame it finds the board among the
-unlabeled markers (centre, 315° and 45° rim markers, plus the north rim marker in between)
-and treats the leftover marker on the board as the ball. The north marker tells the real
-board apart from a ball that rolls next to a rim marker and mimics it, and is never taken
-for the ball. Boards without it (the older 3-marker setup) still work.
+Counts gate crossings and edge hits live while Motive is recording. The board is a Motive
+rigid body whose four markers are labelled **Center**, **North**, **NE** (45° rim) and **NW**
+(315° rim) in Motive's Labels pane; the ball is the one unlabeled marker lying on the board.
+The app takes the board's position from the labelled markers and projects the ball onto it,
+so marker IDs changing mid-trial no longer matter. The label is matched on the last part of
+the name (`Board:NE`, `NE`), upper or lower case; `Centre` also works.
 
 Score = gates × `gate_points` − edge hits × `edge_penalty` (1 and 0.5 by default).
 
@@ -52,7 +52,7 @@ In Motive's streaming settings (Motive 3: *Settings > Streaming*; Motive 2: *Dat
 - **Local interface:** *Loopback* (127.0.0.1) when the app runs on the Motive PC (recommended),
   otherwise the PC's network address.
 - **Transmission type:** *Unicast* (leave *multicast* unticked in the app), or tick both.
-- Stream **labeled and unlabeled markers**. The app reads the unlabeled ones.
+- Stream **labeled and unlabeled markers**, with the board's markers labelled Center, North, NE and NW. The app reads the unlabeled ones.
 - Up axis: either (the app works out which way is up from the board).
 
 A short version of this is in the app under *About* (Mac: app menu > About BallBoardCounter;
@@ -99,22 +99,18 @@ Defaults, to confirm against the task's rules and your manual counts:
 | (direction) | both | both directions count; the log records cw/ccw |
 | `edge_hit_r` | 37 cm | the ball counts as hitting the edge beyond this radius (the measured maximum in the practice trial was 38.4 cm) |
 | `edge_rearm_r` | 35 cm | the ball must come back inside this before the next edge hit counts |
-| `centre_rim_mm`, `rim_rim_mm` | 390, 556 mm | centre to rim marker, 315° to 45° marker |
-| `north_nw_mm`, `north_ne_mm` | 315, 285 mm | north rim marker to the 315° and 45° markers |
-| `marker_tol_mm` | 15 mm | how far the board distances may deviate (measured: within 5 mm) |
 | `max_gap_s` | 0.5 s | if the ball is lost longer than this, no crossing is counted across the gap |
 
-On `BallBoard_Marc_C_S1_T01_Practise.csv` the defaults give 78 gates and 18 edge hits (score 69).
-On the 4-marker pilot takes (`MATCH/data/Pilot data`) the ball position matches `MATCH/analysis/board.py`
-to within 1 cm in all but ~15 of ~187,000 frames.
+Exports and streams from before the board markers were labelled (`Unlabeled NNNN` for all five) are
+not read any more: the CSV reader says which labels are missing.
+
 The edge thresholds are the ones to tune against manual counts. Restart the app after editing.
 
-An existing `settings.json` keeps its old values: after updating, set `marker_tol_mm` to 15 (it
-used to be 30, loose enough for the ball to pass as a rim marker) or delete the file so it is
-recreated with the defaults.
+The geometry settings (`centre_rim_mm` and friends) are gone; an old `settings.json` with them still loads.
 
 ## Not yet tested
 
 The live connection has only been tested against the `natnet` library's own data objects,
 not against a running Motive. First check in the lab: connect while a take plays back and
-confirm `board ✓ ball ✓` and that the counts match a replay of the same take's CSV export.
+confirm `board ✓ ball ✓` (the board marker names are read from Motive's model description, which
+needs NatNet 4 or later, and are matched to the stream by marker number, 1-based) and that the counts match a replay of the same take's CSV export.

@@ -1,9 +1,12 @@
 """Ball-on-board counting core: no UI, no networking. Feed it frames, get events.
 
+The board is a Motive rigid body whose four markers are labelled Center, North, NE and NW
+(NE = 45° rim marker, NW = 315° rim marker); the ball is the one unlabeled marker lying on
+the board. A "frame" here is (board, free): board (4,3) mm in ROLES order, free (k,3) mm
+unlabeled markers.
+
 Per frame:
-  1. identify()     which unlabeled markers are the board (centre + 315° and 45° rim markers,
-                    plus the north rim marker in between) and which is the ball, from the
-                    board's shape alone, so marker IDs changing mid-trial don't matter
+  1. identify()     board axes from the labelled markers, ball = leftover marker on the board
   2. to_map()       project the ball onto the board, in the board map's frame (cm)
   3. Counter.update gate crossings and edge hits
 
@@ -14,14 +17,18 @@ import csv
 import json
 import math
 from dataclasses import asdict, dataclass, fields
-from itertools import combinations
 
 import numpy as np
 
 R_BOARD = 39.0                  # cm, centre -> rim marker
 GATES = (0, 90, 180, 270)       # compass degrees on the board map
 ROT = 135                       # board axes (u toward the 315° marker) -> map frame, degrees
-NORTH_TOL_MM = 10.0             # north marker match: rigid, so ~1 mm off; the ball can't get this close to it
+ROLES = {"center": 0, "centre": 0, "north": 1, "ne": 2, "nw": 3}   # marker label -> row of `board`
+
+
+def role(name):
+    """Marker name ("Board:NE", "ne", ...) -> row of the board array, or None if not a board marker."""
+    return ROLES.get((name or "").rsplit(":", 1)[-1].strip().lower())
 
 
 @dataclass
@@ -34,11 +41,6 @@ class Settings:
     same_gate_twice: bool = False   # False: rocking back and forth over one gate counts once
     edge_hit_r: float = 37.0        # cm from the centre that counts as hitting the edge
     edge_rearm_r: float = 35.0      # the ball must come back inside this before the next hit
-    centre_rim_mm: float = 390.0    # board marker triangle: centre <-> rim marker
-    rim_rim_mm: float = 556.0       # 315° rim marker <-> 45° rim marker
-    north_nw_mm: float = 315.0      # north rim marker <-> 315° marker (centre <-> north: centre_rim_mm)
-    north_ne_mm: float = 285.0      # north rim marker <-> 45° marker
-    marker_tol_mm: float = 15.0     # how far the board distances may deviate from the above
     max_gap_s: float = 0.5          # ball lost for longer than this: don't bridge the gap
 
     @classmethod
@@ -56,58 +58,27 @@ class Settings:
         return s
 
 
-def identify(markers, s):
-    """(k,3) unlabeled marker positions (mm) -> (centre, ne, nw, ball) positions, or None.
+def identify(board, free):
+    """-> (centre, ne, nw, ball) positions (mm), or None if a board marker needed for the axes is missing.
 
-    Board: a triangle whose sides match centre-rim, centre-rim, rim-rim (the 315° and 45°
-    markers). The rim markers are told apart by turning direction: seen from above, going
-    from the 45° marker to the 315° marker around the centre is anticlockwise. "Above" is
-    the room axis the board's normal points along most (the board is roughly level), so
-    this works with Z-up CSV exports and Y-up streams alike.
-    North marker: the 4th board marker, on the rim between the 315° and 45° markers, at
-    north_nw_mm / north_ne_mm from them. The ball near the rim can mimic a rim marker and
-    form a second plausible triangle; only the real 315°/45° pair has the north marker
-    next to it, so it decides between them. Every triangle is scored on all its distances
-    plus the north match (capped, so a hidden north marker or a 3-marker board still work).
-    The north marker lies on the board too and is never taken for the ball.
-    Ball: the leftover marker lying on the board, if any (else ball is None).
+    Ball: the free marker lying on the board (inside the rim, nearest to its face), if any
+    (else None). Hands on the handles are outside the rim.
+    ponytail: needs Center, NE and NW; a hidden one means no board this frame. Rebuild it from
+    North and the rigid body pose (as board.py's fill_board does) if that loses frames.
     """
-    m = markers[~np.isnan(markers).any(axis=1)]
-    if len(m) < 3:
+    centre, _, ne, nw = board
+    if np.isnan([centre, ne, nw]).any():
         return None
-    d = np.linalg.norm(m[:, None] - m[None], axis=2)
-    north_err = lambda i, ne, nw: max(abs(d[i, nw] - s.north_nw_mm), abs(d[i, ne] - s.north_ne_mm))
-    best = None
-    for c in range(len(m)):
-        near = np.flatnonzero(np.abs(d[c] - s.centre_rim_mm) < s.marker_tol_mm)
-        for a, b in combinations(near, 2):
-            if abs(d[a, b] - s.rim_rim_mm) >= s.marker_tol_mm:
-                continue
-            n = np.cross(m[a] - m[c], m[b] - m[c])
-            ne, nw = (a, b) if n[np.argmax(np.abs(n))] > 0 else (b, a)
-            north = min((north_err(i, ne, nw) for i in range(len(m)) if i not in (c, a, b)), default=np.inf)
-            err = (abs(d[a, b] - s.rim_rim_mm) + abs(d[c, a] - s.centre_rim_mm) + abs(d[c, b] - s.centre_rim_mm)
-                   + min(north, s.marker_tol_mm))
-            if best is None or err < best[0]:
-                best = (err, c, ne, nw)
-    if best is None:
-        return None
-    _, c, ne, nw = best
-
-    # not the ball: the north marker (and any duplicate of it). Its mirror image across the
-    # 315°-45° line, 16 cm from the centre, has the same two distances, hence the centre check.
-    others = {i for i in set(range(len(m))) - {c, ne, nw}
-              if not (north_err(i, ne, nw) < NORTH_TOL_MM and d[i, c] > s.centre_rim_mm / 2)}
-
-    # ball: nearest-to-the-board-face marker inside the rim (hands on the handles are outside)
-    u, v, nrm = board_axes(m[c], m[ne], m[nw])
+    u, v, nrm = board_axes(centre, ne, nw)
     ball, best_h = None, 80.0                                  # mm: at most this far off the face
-    for i in others:
-        rel = m[i] - m[c]
+    for p in free:
+        if np.isnan(p).any():
+            continue
+        rel = p - centre
         h = abs(rel @ nrm)
         if np.hypot(rel @ u, rel @ v) < (R_BOARD + 2) * 10 and h < best_h:
-            ball, best_h = m[i], h
-    return m[c], m[ne], m[nw], ball
+            ball, best_h = p, h
+    return centre, ne, nw, ball
 
 
 def board_axes(centre, ne, nw):
@@ -126,9 +97,9 @@ def to_map(p, centre, ne, nw):
     return bu * math.cos(th) - bv * math.sin(th), bu * math.sin(th) + bv * math.cos(th)
 
 
-def ball_on_map(markers, s):
-    """-> ((x, y) cm or None, board found?)"""
-    found = identify(markers, s)
+def ball_on_map(frame):
+    """frame = (board, free) -> ((x, y) cm or None, board found?)"""
+    found = identify(*frame)
     if found is None:
         return None, False
     centre, ne, nw, ball = found
@@ -212,9 +183,11 @@ class Counter:
 
 
 def read_motive_csv(path):
-    """Motive CSV export -> (frame numbers, times s, (N, k, 3) unlabeled marker positions mm).
+    """Motive CSV export -> (frame numbers, times s, (N,4,3) board markers mm, (N,k,3) free markers mm).
 
-    Only markers without a ":" in their name (skeleton markers are "<skeleton>:<marker>").
+    Board markers are the ones labelled Center / North / NE / NW (any prefix, e.g. "Board:NE"),
+    in ROLES order. Free markers are the unlabeled ones: no ":" in the name (skeleton markers
+    are "<skeleton>:<marker>").
     """
     with open(path, newline="") as f:
         rows = list(csv.reader(f))
@@ -224,12 +197,19 @@ def read_motive_csv(path):
     rotpos, axis = rows[h - 1], rows[h]
     cols = {}
     for j in range(2, len(axis)):
-        if kind[j] == "Marker" and rotpos[j] == "Position" and axis[j] in "XYZ" and ":" not in name[j]:
+        if kind[j] == "Marker" and rotpos[j] == "Position" and axis[j] in "XYZ":
             cols.setdefault(name[j], {})[axis[j]] = j
-    idx = [c[a] for c in cols.values() for a in "XYZ"]
+    board = {role(n): c for n, c in cols.items() if role(n) is not None}
+    missing = [k for k in ("Center", "North", "NE", "NW") if ROLES[k.lower()] not in board]
+    if missing:
+        raise ValueError(f"board markers not found in the export: {', '.join(missing)} "
+                         "(rename the board's markers in Motive's Labels pane)")
+    free = [c for n, c in cols.items() if role(n) is None and ":" not in n]
     num = lambda x: float(x) if x else np.nan
+    pick = lambda r, cs: [num(r[c[a]]) if c[a] < len(r) else np.nan for c in cs for a in "XYZ"]
     data = [r for r in rows[h + 1:] if r]
     frames = np.array([int(r[0]) for r in data])
     times = np.array([float(r[1]) for r in data])
-    pos = np.array([[num(r[j]) if j < len(r) else np.nan for j in idx] for r in data])
-    return frames, times, pos.reshape(len(data), len(cols), 3)
+    b = np.array([pick(r, [board[i] for i in range(4)]) for r in data]).reshape(len(data), 4, 3)
+    f = np.array([pick(r, free) for r in data]).reshape(len(data), len(free), 3)
+    return frames, times, b, f

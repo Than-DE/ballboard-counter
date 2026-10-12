@@ -42,27 +42,57 @@ MODES = {"idle": ("#6b6b6b", "NOT CONNECTED"),       # banner colour, label
 # --- frame sources: call on_frame(frame, t, (k,3) mm) from their own thread ---------------
 
 class LiveSource:
-    """Frames streamed by Motive. NatNet sends metres; unlabeled markers have model ID 0."""
+    """Frames streamed by Motive. NatNet sends metres; unlabeled markers have model ID 0.
+
+    The board's markers arrive as labeled markers of the board rigid body, numbered 1..n in the
+    order of the rigid body's marker list; their names (Center, North, NE, NW) come from
+    Motive's model description (NatNet 4+), which is requested again until it is known.
+    """
 
     def __init__(self, server, local, multicast, on_frame):
         from natnet import NatNetClient
         self.client = NatNetClient(server_ip_address=server, local_ip_address=local,
                                    use_multicast=multicast)
         self.client.on_data_frame_received_event.handlers.append(self._frame)
+        self.client.on_data_description_received_event.handlers.append(self._descriptions)
         self.on_frame = on_frame
+        self.board = None                       # (rigid body id, [board row per marker]) once known
+        self.asked = 0.0
 
     def start(self):
         self.client.connect(timeout=5.0)        # raises TimeoutError if Motive doesn't answer
         self.client.run_async()
+        self._ask()
 
     def stop(self):
         self.client.shutdown()
 
+    def _ask(self):
+        self.asked = time.monotonic()
+        self.client.request_modeldef()
+
+    def _descriptions(self, d):
+        for rb in d.rigid_bodies:
+            rows = [C.role(m.name) for m in rb.markers]
+            if set(rows) == {0, 1, 2, 3}:
+                self.board = (rb.id_num, rows)
+
     def _frame(self, df):
-        pts = [m.pos for m in df.labeled_markers if m.model_id == 0 and not (m.param or 0) & 0x01]
-        if not pts:                             # older NatNet versions: legacy unlabeled list
-            pts = list(df.unlabeled_marker_pos)
-        self.on_frame(df.prefix.frame_number, df.suffix.timestamp, np.array(pts, float).reshape(-1, 3) * 1000)
+        if self.board is None and time.monotonic() - self.asked > 2:
+            self._ask()
+        board = np.full((4, 3), np.nan)
+        if self.board is not None:
+            mid, rows = self.board
+            mine = [m for m in df.labeled_markers if m.model_id == mid]
+            base = 0 if any(m.marker_id == 0 for m in mine) else 1          # 1-based unless a 0 shows up
+            for m in mine:
+                if 0 <= m.marker_id - base < len(rows):
+                    board[rows[m.marker_id - base]] = m.pos
+        free = [m.pos for m in df.labeled_markers if m.model_id == 0 and not (m.param or 0) & 0x01]
+        if not free:                            # older NatNet versions: legacy unlabeled list
+            free = list(df.unlabeled_marker_pos)
+        self.on_frame(df.prefix.frame_number, df.suffix.timestamp,
+                      (board * 1000, np.array(free, float).reshape(-1, 3) * 1000))
 
 
 class ReplaySource:
@@ -73,7 +103,8 @@ class ReplaySource:
     """
 
     def __init__(self, path, speed, on_frame, on_seek):
-        self.frames, self.t, self.pos = C.read_motive_csv(path)
+        self.frames, self.t, board, free = C.read_motive_csv(path)
+        self.pos = list(zip(board, free))        # one (board, free) frame per row
         self.speed, self.on_frame, self.on_seek = speed, on_frame, on_seek
         self._stop = threading.Event()
         self._paused = threading.Event()
@@ -256,10 +287,10 @@ class App:
         if frame is None:
             self.q.put(("end",))
             return
-        xy, board = C.ball_on_map(markers, SETTINGS)
+        xy, board = C.ball_on_map(markers)
         with self.lock:
             events = self.counter.update(t, frame, xy) if self.running else []
-        self.q.put(("frame", frame, t, xy, board, len(markers), events))
+        self.q.put(("frame", frame, t, xy, board, len(markers[1]), events))
 
     def on_seek(self, i):
         """Replay jumped to frame i: recount frames 0..i-1 so the totals match a straight play.
@@ -273,7 +304,7 @@ class App:
                 self.counter.reset()
                 # ponytail: recounts from the start, ~0.3 s for 2 min; cache per-frame positions if trials get long
                 for k in range(i):
-                    self.counter.update(float(src.t[k]), int(src.frames[k]), C.ball_on_map(src.pos[k], SETTINGS)[0])
+                    self.counter.update(float(src.t[k]), int(src.frames[k]), C.ball_on_map(src.pos[k])[0])
                 for e in manual:
                     self.counter.manual(e.t, e.frame, e.kind, e.delta)
                 self.counter.events.sort(key=lambda e: e.t)
@@ -578,6 +609,7 @@ Motive 2: Data Streaming pane):
 • local interface: Loopback (127.0.0.1) if this app runs on the Motive PC, otherwise its network address
 • transmission type: Unicast (leave multicast unticked here)
 • stream labeled and unlabeled markers
+• the board is a rigid body whose markers are labelled Center, North, NE and NW (Labels pane)
 Then enter the same IPs here and press Connect."""
 
 

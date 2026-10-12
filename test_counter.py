@@ -1,6 +1,8 @@
 """Self-checks for counter.py. Run: python test_counter.py [path/to/motive_export.csv]"""
 import math
+import pathlib
 import sys
+import tempfile
 
 import numpy as np
 
@@ -15,7 +17,7 @@ def rot135(bu, bv):
 
 
 def test_identify_any_orientation():
-    """Shuffled, tilted board + ball in Z-up and Y-up worlds -> correct roles and map position."""
+    """Tilted board + ball in Z-up and Y-up worlds -> correct ball position on the map."""
     rng = np.random.default_rng(1)
     for up in ("z", "y"):
         for _ in range(20):
@@ -27,27 +29,57 @@ def test_identify_any_orientation():
             v = np.cross(n, u)
             c = rng.uniform(-500, 500, 3) + [0, 0, 1000]
             nw, ne = c + 390 * u, c - 390 * v            # centre -> 315° is u, 45° -> centre is v
+            th = np.radians(47.7)                        # north: 47.7° from the 315° toward the 45° marker
+            north = c + 390 * (np.cos(th) * u - np.sin(th) * v)
             bu, bv = rng.uniform(-250, 250, 2)
             ball = c + bu * u + bv * v + 15 * n
-            pts = np.array([c, ne, nw, ball])
+            hand = c + 600 * u                           # a hand on a handle, outside the rim
+            pts = np.array([c, north, ne, nw, ball, hand])
             if up == "y":                                # right-handed Y-up: (x, y, z) -> (x, z, -y)
                 pts = pts[:, [0, 2, 1]] * [1, 1, -1]
-            order = rng.permutation(4)
-            xy, found = C.ball_on_map(pts[order], S)
+            xy, found = C.ball_on_map((pts[:4], pts[4:][rng.permutation(2)]))
             assert found and np.allclose(xy, rot135(bu / 10, bv / 10)), (up, xy)
 
 
-def test_north_marker():
-    """4-marker board: the north rim marker is never taken for the ball, even with the centre hidden."""
-    c, u, v, up = np.zeros(3), np.array([1.0, 0, 0]), np.array([0, 1.0, 0]), np.array([0, 0, 1.0])
-    th = np.radians(47.7)                                # north: 47.7° from the 315° toward the 45° marker
-    nw, ne, north = c + 390 * u, c - 390 * v, c + 390 * (np.cos(th) * u - np.sin(th) * v)
-    ball = c + 200 * u + 150 * v + 15 * up
-    xy, found = C.ball_on_map(np.array([north, ne, ball, c, nw]), S)
-    assert found and np.allclose(xy, rot135(20, 15)), xy
-    # start of a trial: the ball sits on the centre marker and hides it
-    xy, _ = C.ball_on_map(np.array([north, ne, c + 5 * u + 25 * up, nw]), S)
-    assert xy is None or math.hypot(*xy) < 5, xy
+def test_missing():
+    """A hidden centre marker -> no board; no marker on the board -> board but no ball."""
+    pts = np.array([[0, 0, 0], [0, 390, 0], [275, 275, 0], [-275, 275, 0.]])
+    far = np.array([[0, 0, 900.]])
+    assert C.ball_on_map((pts, far)) == (None, True)
+    pts[0] = np.nan
+    assert C.ball_on_map((pts, far)) == (None, False)
+
+
+def test_names():
+    for n in ("Board:Center", "centre", "Board 2:NE", " nw ", "Board:North"):
+        assert C.role(n) is not None, n
+    for n in ("Board 2:Marker 001", "Unlabeled 1031", "Suhana:RUArm", None):
+        assert C.role(n) is None, n
+
+
+def test_csv(tmp):
+    """A small export with the board labelled, an unlabeled ball and a skeleton marker."""
+    names = ["Board:Center", "Board:North", "Board:NE", "Board:NW", "Unlabeled 7", "Sk:RFIN"]
+    pts = [(0, 0, 0), (0, 390, 0), (275, 275, 0), (-275, 275, 0), (50, 60, 15), (0, 0, 900)]
+    hdr = lambda *cells: ",".join(("", *cells))
+    marker = lambda x: [x] * 3
+    lines = ["Format Version,1.25",
+             "",
+             hdr("Type", *[t for _ in names for t in marker("Marker")]),
+             hdr("Name", *[n for n in names for _ in "XYZ"]),
+             hdr("ID", *["i"] * 18),
+             hdr("Parent", *[""] * 18),
+             hdr("", *["Position"] * 18),
+             "Frame,Time (Seconds)," + ",".join("XYZ" * 6)]
+    lines.append("0,0.0," + ",".join(str(c) for p in pts for c in p))
+    lines.append("1,0.0166," + ",".join(str(c) for p in pts for c in p))
+    p = tmp / "t.csv"
+    p.write_text("\n".join(lines))
+    frames, t, board, free = C.read_motive_csv(p)
+    assert board.shape == (2, 4, 3) and free.shape == (2, 1, 3)
+    assert (board[0, 2] == (275, 275, 0)).all() and (free[0, 0] == (50, 60, 15)).all()
+    xy, found = C.ball_on_map((board[0], free[0]))
+    assert found and xy is not None
 
 
 def test_gates():
@@ -77,14 +109,12 @@ def test_edges():
 
 
 def test_real_take(path):
-    """Same ball position as MATCH/analysis/board.py for frame 10, then count the trial."""
-    frames, t, pos = C.read_motive_csv(path)
-    xy, _ = C.ball_on_map(pos[10], S)
-    assert np.allclose(xy, (-5.358, 4.830), atol=.01), xy
+    """Count a real labelled export (Center/North/NE/NW + unlabeled ball) and print the result."""
+    frames, t, board, free = C.read_motive_csv(path)
     c = C.Counter(S)
     missing = 0
-    for f, ti, m in zip(frames, t, pos):
-        xy, _ = C.ball_on_map(m, S)
+    for f, ti, b, fr in zip(frames, t, board, free):
+        xy, _ = C.ball_on_map((b, fr))
         missing += xy is None
         c.update(ti, f, xy)
     print(f"{path}: {len(t)} frames, ball missing in {missing}, "
@@ -93,7 +123,10 @@ def test_real_take(path):
 
 if __name__ == "__main__":
     test_identify_any_orientation()
-    test_north_marker()
+    test_missing()
+    test_names()
+    with tempfile.TemporaryDirectory() as d:
+        test_csv(pathlib.Path(d))
     test_gates()
     test_edges()
     for p in sys.argv[1:]:
