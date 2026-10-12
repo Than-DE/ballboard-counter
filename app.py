@@ -560,8 +560,32 @@ class App:
         self.root.destroy()
 
 
+ABOUT = """Counts the ball's gate crossings and edge hits on the ball-on-board task, live while \
+Motive records or from a replayed CSV export, and logs every event per trial. Part of the MATCH study.
+
+Connecting to a live recording, in Motive's streaming settings (Motive 3: Settings > Streaming; \
+Motive 2: Data Streaming pane):
+• enable NatNet streaming
+• local interface: Loopback (127.0.0.1) if this app runs on the Motive PC, otherwise its network address
+• transmission type: Unicast (leave multicast unticked here)
+• stream labeled and unlabeled markers
+Then enter the same IPs here and press Connect."""
+
+
+def about():
+    messagebox.showinfo("About Ball-board counter", "Ball-board counter", detail=ABOUT)
+
+
 if __name__ == "__main__":
     root = tk.Tk()
+    if sys.platform == "darwin":
+        root.createcommand("tkAboutDialog", about)      # app menu > About BallBoardCounter
+    else:
+        menubar = tk.Menu(root)
+        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(label="About", command=about)
+        menubar.add_cascade(label="Help", menu=help_menu)
+        root.configure(menu=menubar)
     try:
         root.iconphoto(True, tk.PhotoImage(file=ICON))
     except tk.TclError:

@@ -55,6 +55,9 @@ In Motive's streaming settings (Motive 3: *Settings > Streaming*; Motive 2: *Dat
 - Stream **labeled and unlabeled markers**. The app reads the unlabeled ones.
 - Up axis: either (the app works out which way is up from the board).
 
+A short version of this is in the app under *About* (Mac: app menu > About BallBoardCounter;
+Windows: Help > About).
+
 Motive streams while live and while playing back a take, so a recorded take is a good
 way to test the connection.
 
