@@ -560,8 +560,17 @@ class App:
         self.root.destroy()
 
 
-ABOUT = """Counts the ball's gate crossings and edge hits on the ball-on-board task, live while \
-Motive records or from a replayed CSV export, and logs every event per trial. Part of the MATCH study.
+ABOUT = """Part of MATCH (Motor Adaptation Through Complexity matching in Harmonized joint action), \
+a Tilburg University research project on joint action as training for upper-body motor rehabilitation.
+
+The ball-on-board task: participants, alone or in pairs, hold a large round board by its black \
+handles and tilt it to roll a ball as fast and accurately as possible along the circular target \
+track. Each pass through one of the four doors ("gates" here) scores 1 point, each time the ball \
+hits the board's edge costs ½ point. A trial lasts 2 minutes.
+
+This program does that counting, instead of the experimenter counting by eye. It reads the board \
+and ball markers from OptiTrack Motive, live during a recording or from a CSV export, shows the \
+score as the trial runs and logs every gate crossing and edge hit to a CSV per trial.
 
 Connecting to a live recording, in Motive's streaming settings (Motive 3: Settings > Streaming; \
 Motive 2: Data Streaming pane):
