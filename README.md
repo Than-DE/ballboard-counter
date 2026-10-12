@@ -13,6 +13,12 @@ tracked, red when missing, with the same dots on the board), Motive connection, 
 Manual correction and Events. Click a section title to fold it; the sidebar scrolls when the
 window is small.
 
+**Trials.** Live, the app starts and stops a trial with Motive's recording (the "is recording"
+flag in every frame), so each take gets its own log. Tick that off, or just press **Start** and
+**Stop**, for a manual trial that needs no recording in Motive. A trial you start by hand is
+never stopped by Motive, and connecting while Motive is already recording starts nothing
+(press Start). The log is named after the Trial name field plus a timestamp.
+
 Score = gates × `gate_points` − edge hits × `edge_penalty` (1 and 0.5 by default).
 
 | File | What it is |

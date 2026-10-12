@@ -122,7 +122,7 @@ class LiveSource:
         if not free:                            # older NatNet versions: legacy unlabeled list
             free = list(df.unlabeled_marker_pos)
         self.on_frame(df.prefix.frame_number, df.suffix.timestamp,
-                      (board * 1000, np.array(free, float).reshape(-1, 3) * 1000))
+                      (board * 1000, np.array(free, float).reshape(-1, 3) * 1000), df.suffix.is_recording)
 
 
 class ReplaySource:
@@ -196,6 +196,8 @@ class App:
         self.status_bits = ""
         self.mode = "idle"
         self.connecting = self.closing = False
+        self.rec = None                         # Motive's recording flag, last frame (None: unknown / not live)
+        self.auto = False                       # the running trial was started by Motive's recording
         self._tl_key = None
         self.dirty = True                       # board view needs re-applying (set by every redraw)
         self.xy, self.present = None, None      # latest ball on the map, and which of the 4 board markers are tracked
@@ -291,6 +293,11 @@ class App:
         ttk.Label(sec.body, text="Name (used for the log file)").pack(anchor="w")
         self.trial = tk.StringVar(value="trial")
         ttk.Entry(sec.body, textvariable=self.trial).pack(fill="x", pady=(2, 8))
+        self.follow = tk.BooleanVar(value=True)
+        ttk.Checkbutton(sec.body, text="Start and stop with Motive's recording (live)",
+                        variable=self.follow).pack(anchor="w", pady=(0, 2))
+        self.rec_note = ttk.Label(sec.body, text="")
+        self.rec_note.pack(anchor="w", pady=(0, 8))
         row = ttk.Frame(sec.body)
         row.pack(fill="x")
         self.start_btn = ttk.Button(row, text="Start", style="Big.TButton", command=self.start)
@@ -414,7 +421,8 @@ class App:
         self.dirty = True                                           # poll() re-applies ball, trail, markers
 
     # frames (source thread)
-    def on_frame(self, frame, t, markers):
+    def on_frame(self, frame, t, markers, recording=None):
+        """recording: Motive's "is recording" flag for this frame (live only), else None."""
         if frame is None:
             self.q.put(("end",))
             return
@@ -422,7 +430,7 @@ class App:
         present = tuple(~np.isnan(markers[0]).any(axis=1))
         with self.lock:
             events = self.counter.update(t, frame, xy) if self.running else []
-        self.q.put(("frame", frame, t, xy, present, len(markers[1]), events))
+        self.q.put(("frame", frame, t, xy, present, len(markers[1]), events, recording))
 
     def on_seek(self, i):
         """Replay jumped to frame i: recount frames 0..i-1 so the totals match a straight play.
@@ -473,8 +481,9 @@ class App:
                 if msg[0] == "connect_failed":
                     self._connect_failed(msg[1])
                     continue
-                _, frame, t, xy, present, n, events = msg
+                _, frame, t, xy, present, n, events, rec = msg
                 latest = msg
+                self._follow_recording(rec)
                 if self.running and self.t_start is None:
                     self.t_start = t
                 self.rate.append(time.monotonic())
@@ -491,7 +500,7 @@ class App:
         while self.rate and now - self.rate[0] > 1:
             self.rate.popleft()
         if latest:
-            _, frame, t, self.xy, self.present, self.n_free, _ = latest
+            _, frame, t, self.xy, self.present, self.n_free, _, _ = latest
             self.last = (frame, t)
             while self.trail and t - self.trail[0][0] > TRAIL_S:
                 self.trail.popleft()
@@ -511,6 +520,22 @@ class App:
                 self.canvas.itemconfigure(item, **({"outline": "peru"} if item == self.rim else {"fill": "white"}))
                 del self.flash[item]
         self.root.after(33, self.poll)
+
+    def _follow_recording(self, rec):
+        """Motive started / stopped recording: start / stop the trial. A manual trial is never touched.
+
+        Only a change counts, so connecting while Motive is already recording starts nothing.
+        A trial that was started by hand keeps running through the recording and stops by hand.
+        ponytail: acts on the UI thread, so the first ~30 ms of a recording are not counted.
+        """
+        prev, self.rec = self.rec, rec
+        if rec is None or prev is None or rec == prev or self.mode != "live" or not self.follow.get():
+            return
+        if rec and not self.running:
+            self.start()
+            self.auto = True
+        elif not rec and self.auto:
+            self.stop()
 
     def _draw_view(self):
         """Ball, trail and board-marker dots on the canvas, from the latest frame."""
@@ -546,6 +571,8 @@ class App:
         else:
             note = "The board's rigid body markers must be labelled Center, North, NE, NW in Motive."
         self._set(self.marker_note, text=note)
+        live = self.mode == "live" and not live_gap
+        self._set(self.rec_note, text=("Motive is recording" if self.rec else "Motive is not recording") if live else "")
 
     def _show_event(self, ev):
         """A new event: add it everywhere and flash the gate or rim."""
@@ -631,6 +658,7 @@ class App:
             src.stop()
             return
         self.source, self.source_name = src, f"Motive {server}"
+        self.rec = None
         self._set_mode("live")
         self.replay_t = None
         self.replay_bar.pack_forget()
@@ -785,6 +813,7 @@ class App:
         self.log_writer.writeheader()
 
     def stop(self):
+        self.auto = False
         with self.lock:
             self.running = False
         if self.log:
